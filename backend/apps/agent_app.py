@@ -304,6 +304,8 @@ async def northbound_agent_run_api(
     """Run a northbound-prepared agent request inside the runtime service."""
     try:
         user_id, tenant_id = verify_internal_runtime_jwt(authorization)
+        # Private provenance is lost in the proxy's JSON serialization; restore it only after internal authentication.
+        agent_request.__dict__["_runtime_metadata_entrypoint"] = "northbound"
         return await run_agent_stream(
             agent_request=agent_request,
             http_request=None,

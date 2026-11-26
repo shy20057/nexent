@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi.responses import StreamingResponse
 
+from consts.exceptions import UnauthorizedError
 from test.backend.app.test_agent_app import runtime_client
 
 
@@ -21,11 +22,14 @@ def test_internal_northbound_forwards_answer_mode(query, expected):
             patch("apps.agent_app.run_agent_stream", new_callable=AsyncMock) as run:
         run.return_value = StreamingResponse(events(), media_type="text/event-stream")
         response = runtime_client.post("/agent/internal/northbound/run" + query,
-                                       json={"agent_id": 1, "query": "hello"})
+                                       json={"agent_id": 1, "query": "hello", "metadata": {"source": "business-api"}})
     assert response.status_code == 200
     assert run.await_args.kwargs["final_answer_mode"] == expected
     assert run.await_args.kwargs["skip_user_save"] is True
     assert run.await_args.kwargs["user_id"] == "user"
+    received = run.await_args.kwargs["agent_request"]
+    assert received.metadata == {"source": "business-api"}
+    assert getattr(received, "_runtime_metadata_entrypoint", "native") == "northbound"
 
 
 def test_internal_northbound_rejects_invalid_mode_before_running():
@@ -43,6 +47,22 @@ def test_native_route_does_not_opt_in_to_complete_mode():
     with patch("apps.agent_app.get_current_user_id", return_value=("user", "tenant")), \
             patch("apps.agent_app.run_agent_stream", new_callable=AsyncMock) as run:
         run.return_value = StreamingResponse(events(), media_type="text/event-stream")
-        response = runtime_client.post("/agent/run", json={"agent_id": 1, "query": "hello"})
+        response = runtime_client.post("/agent/run", json={
+            "agent_id": 1, "query": "hello", "metadata": {"source": "user-input"},
+            "_runtime_metadata_entrypoint": "northbound",
+        })
     assert response.status_code == 200
     assert "final_answer_mode" not in run.await_args.kwargs
+    received = run.await_args.kwargs["agent_request"]
+    assert received.metadata == {"source": "user-input"}
+    assert getattr(received, "_runtime_metadata_entrypoint", "native") == "native"
+
+
+def test_internal_northbound_metadata_requires_internal_authentication():
+    with patch("apps.agent_app.verify_internal_runtime_jwt", side_effect=UnauthorizedError("Invalid internal token")), \
+            patch("apps.agent_app.run_agent_stream", new_callable=AsyncMock) as run:
+        response = runtime_client.post("/agent/internal/northbound/run", json={
+            "agent_id": 1, "query": "hello", "metadata": {"source": "unverified"},
+        })
+    assert response.status_code == 401
+    run.assert_not_awaited()
